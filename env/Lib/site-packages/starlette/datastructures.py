@@ -7,7 +7,6 @@ from typing import (
     BinaryIO,
     NamedTuple,
     TypeVar,
-    Union,
     cast,
 )
 from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit
@@ -482,7 +481,7 @@ class UploadFile:
         return f"{self.__class__.__name__}(filename={self.filename!r}, size={self.size!r}, headers={self.headers!r})"
 
 
-class FormData(ImmutableMultiDict[str, Union[UploadFile, str]]):
+class FormData(ImmutableMultiDict[str, UploadFile | str]):
     """
     An immutable multidict, containing both file uploads and text input.
     """
@@ -690,3 +689,18 @@ class State:
 
     def __delattr__(self, key: Any) -> None:
         del self._state[key]
+
+    def __getitem__(self, key: str) -> Any:
+        return self._state[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._state[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._state[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._state)
+
+    def __len__(self) -> int:
+        return len(self._state)

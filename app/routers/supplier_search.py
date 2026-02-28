@@ -3,9 +3,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.db.database import get_db
 
+# This defines the variable that main.py is trying to import
 router = APIRouter(prefix="/supplier", tags=["Supplier"])
-
-
 # =====================================================
 # 1. SUPPLIER DROPDOWN / SEARCH
 # =====================================================

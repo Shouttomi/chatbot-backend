@@ -9,7 +9,7 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
     # Demo credentials
-    if form_data.username != "admin" or form_data.password != "1234":
+    if form_data.username != "admin" or form_data.password != "12345":
         return {"error": "Invalid credentials"}
 
     token = create_access_token({"sub": form_data.username})
