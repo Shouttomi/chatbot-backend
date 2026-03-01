@@ -20,7 +20,7 @@ def root():
     return {"message": "Mewar ERP API running"}
 
 
-# @app.get("/check-db")
+# @app.get("/che     ck-db")
 # def check_db(db: Session = Depends(get_db)):
 #     result = db.execute(text("SHOW TABLES;"))
 #     tables = result.fetchall()

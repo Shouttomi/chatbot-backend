@@ -5,273 +5,206 @@ from app.db.database import get_db
 from app.schemas.chat import ChatRequest
 from app.dependencies import get_current_user
 
+# --- IMPORT OLLAMA ENGINE ---
+from app.services.ollama_engine import ask_ollama
 from rapidfuzz import process, fuzz
-import re
 
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 
-# -------------------------------------------------
-# HINGLISH MAP (MINIMAL BUT USEFUL)
-# -------------------------------------------------
-HINGLISH_MAP = {
-    "hai kya": "available",
-    "milega": "available",
-    "milta": "available",
-    "kitna": "stock",
-    "kitni": "stock",
-    "kitne": "stock",
-    "dikhao": "show",
-    "list dikhao": "show",
-    "sab dikhao": "show all",
-    "mujhe": "",
-    "chahiye": "",
-    "ka": "",
-    "ki": "",
-    "ke": "",
-    "ko": "",
-    "se": "",
-    "maal": "product",
-    "saman": "product",
-    "namaste": "hi",
-    "shukriya": "thanks",
-    "alvida": "bye"
-}
+GREETINGS = ["hi", "hello", "hey", "namaste", "namaskar", "ram ram"]
 
-# -------------------------------------------------
-# INTENT LISTS
-# -------------------------------------------------
-GREETINGS = [
-    "hi","hello","hey","hii","helloo",
-    "namaste","namaskar","ram ram",
-    "good morning","good evening"
-]
-
-THANKS = [
-    "thanks","thank you","thankyou",
-    "thx","shukriya","dhanyavad"
-]
-
-BYES = [
-    "bye","goodbye","exit","quit",
-    "alvida","khuda hafiz"
-]
-
-STOP_WORDS = [
-    "how","much","many","is","are","am",
-    "please","pls","plz",
-    "show","give","check","see",
-    "for","the","of","in","on","at","to",
-    "product","products","item","items",
-    "ka","ki","ke","ko","se","hai"
-]
-
-ENGLISH_SHOW_WORDS = [
-    "show","list","display","view","see",
-    "give","provide","get","fetch",
-    "show all","list all","display all",
-    "inventory","catalog","menu",
-    "browse","explore","look","inspect"
-]
-
-# -------------------------------------------------
-# HELPERS
-# -------------------------------------------------
-def translate_hinglish(q: str) -> str:
-    q = q.lower()
-    for h in sorted(HINGLISH_MAP.keys(), key=len, reverse=True):
-        q = q.replace(h, HINGLISH_MAP[h])
-    return q
-
-
-def clean_sentence(q: str) -> str:
-    q = re.sub(r'[^a-z0-9\s]', ' ', q)
-    words = q.split()
-    words = [w for w in words if w not in STOP_WORDS]
-    return " ".join(words)
-
-
-def detect_show(q: str):
-    q = q.lower()
-    words = q.split()
-    return any(w in ENGLISH_SHOW_WORDS for w in words)
-
-
-
-
-
-
-def get_all_product_names(db: Session):
-    rows = db.execute(text("SELECT name FROM inventories")).fetchall()
-    return [r[0] for r in rows]
-
-
-def spell_correct(query: str, db: Session) -> str:
-    names = get_all_product_names(db)
-    if not names:
-        return query
-
-    match = process.extractOne(query, names, scorer=fuzz.partial_ratio)
-    if match and match[1] >= 65:
-        return match[0]
-
-    return query
-
-
-# -------------------------------------------------
-# MAIN CHATBOT
-# -------------------------------------------------
 @router.post("/")
 def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    raw_q = request.query.strip()
+    low_q = raw_q.lower()
 
- raw_q = request.query.lower().strip()
- raw_q = translate_hinglish(raw_q)
+    # =========================================================
+    # 1. GREETING CHECK
+    # =========================================================
+    words = low_q.split()
+    if any(g in words for g in GREETINGS) and len(words) <= 2:
+        return {"message": "Hello! 🙏 I am the Mewar ERP AI. How can I help you today?"}
 
-# 1. detect show FIRST
- show_mode = detect_show(raw_q)
+    # =========================================================
+    # 2. AI EXTRACTION
+    # =========================================================
+    ai_data = ask_ollama(raw_q)
+    intent = ai_data.get("intent", "search")
+    products = ai_data.get("products", [])
 
-# 2. clean sentence
- q = clean_sentence(raw_q)
-
- if not q:
-    return {"message": "Please type product name."}
-
-# 3. ONLY spell correct if NOT show
- if not show_mode:
-    q = spell_correct(q, db)
-
-
-    raw_q = translate_hinglish(raw_q)
-
-    # -------- INTENTS --------
-    if any(g in raw_q for g in GREETINGS):
-        return {"message": "Hello 👋 I am MEWAR ERP chatbot assistant."}
-
-    if any(t in raw_q for t in THANKS):
-        return {"message": "😊 You're welcome!"}
-
-    if any(b in raw_q for b in BYES):
-        return {"message": "👋 Goodbye!"}
-
-     # ---------- SHOW DETECTION (BEFORE CLEAN)
-    show_mode = detect_show(raw_q)
-
-# ---------- CLEAN AFTER DETECT
-    q = clean_sentence(raw_q)
-
-    if not q:
-        return {"message": "Please type product name."}
-
-    q = spell_correct(q, db)
-
-# ---------- DROPDOWN MODE
-    if show_mode:
-        rows = db.execute(
-        text("""
-            SELECT DISTINCT name
-            FROM inventories
-            WHERE LOWER(name) LIKE LOWER(:q)
-            ORDER BY name
-            LIMIT 20
-        """),
-        {"q": f"%{q}%"}
-    ).fetchall()
-
-    if rows:
+    # =========================================================
+    # FEATURE 1: SHOW ALL SUPPLIERS
+    # =========================================================
+    if intent == "supplier_list" or low_q == "supplier":
+        suppliers = db.execute(text("SELECT id, supplier_name FROM suppliers LIMIT 50")).fetchall()
         return {
-            "message": "🔍 Matching Products:",
-            "items": [r[0] for r in rows]
+            "type": "supplier_list",
+            "message": "Active Suppliers Directory:",
+            "suppliers": [{"id": s.id, "name": s.supplier_name} for s in suppliers]
         }
 
+    if not products and not low_q.startswith("supplier "):
+        return {"message": "Please specify the items or supplier you are looking for."}
 
+    # =========================================================
+    # FEATURE 2: SUPPLIER SMART SEARCH (YOUR CUSTOM LOGIC)
+    # =========================================================
+    if intent == "supplier_search" or low_q.startswith("supplier "):
+        # Extract ID or Name safely
+        q = str(products[0]).strip().lower() if products else low_q.replace("supplier", "").strip()
+        if low_q.startswith("supplier ") and q == low_q:
+            q = low_q.replace("supplier", "").strip()
 
-    # -------- CLEAN --------
-    q = clean_sentence(raw_q)
+        # Find the Supplier
+        if q.isdigit():
+            suppliers = db.execute(text("""
+                SELECT id, supplier_name, supplier_code, email, gstin
+                FROM suppliers WHERE id = :id LIMIT 10
+            """), {"id": int(q)}).fetchall()
+        else:
+            suppliers = db.execute(text("""
+                SELECT id, supplier_name, supplier_code, email, gstin
+                FROM suppliers 
+                WHERE LOWER(supplier_name) LIKE LOWER(:q) OR LOWER(supplier_code) LIKE LOWER(:q)
+                ORDER BY supplier_name LIMIT 10
+            """), {"q": f"%{q}%"}).fetchall()
 
-    if not q:
-        return {"message": "Please type product name."}
+        # Handle Multiple or None
+        if len(suppliers) > 1:
+            return {
+                "type": "dropdown",
+                "items": [{"id": s.id, "name": s.supplier_name, "code": s.supplier_code} for s in suppliers]
+            }
+        
+        if not suppliers:
+            return {"message": f"Supplier '{q}' not found."}
 
-    # =====================================================
-    # STEP 1 — DROPDOWN SEARCH FIRST
-    # =====================================================
-    search_rows = db.execute(
-        text("""
-            SELECT DISTINCT name
-            FROM inventories
-            WHERE LOWER(name) LIKE LOWER(:q)
-            ORDER BY name
-            LIMIT 20
-        """),
-        {"q": f"%{q}%"}
-    ).fetchall()
+        # --- YOUR EXACT SUPPLIER INVENTORY LOOP LOGIC ---
+        supplier = suppliers[0]
+        supplier_id = supplier.id
 
-    # If user typed product only → DROPDOWN
-    if search_rows and not show_mode and len(search_rows) > 1:
+        inventories = db.execute(text("SELECT id, name, classification FROM inventories ORDER BY name")).fetchall()
+        
+        finish_total = 0
+        semi_finish_total = 0
+        items = []
+
+        for inv in inventories:
+            txns = db.execute(text("""
+                SELECT txn_type, ref_type, quantity FROM stock_transactions
+                WHERE inventory_id = :inv_id AND supplier_id = :supplier_id
+            """), {"inv_id": inv.id, "supplier_id": supplier_id}).fetchall()
+
+            in_qty, out_qty, finish_in, machining_out = 0, 0, 0, 0
+            for t in txns:
+                txn_type = (t.txn_type or "").lower()
+                ref_type = (t.ref_type or "").lower()
+                qty = float(t.quantity or 0)
+                
+                if txn_type == "in" and ref_type != "finish": in_qty += qty
+                if txn_type == "out" and ref_type != "machining": out_qty += qty
+                if txn_type == "in" and ref_type == "finish": finish_in += qty
+                if txn_type == "out" and ref_type == "machining": machining_out += qty
+
+            classification = (inv.classification or "").upper().strip()
+            total = in_qty - out_qty
+            
+            # FILTER ZERO STOCK
+            if total != 0:
+                if classification == "FINISH" or classification in ["", "NULL"]:
+                    finish_total += total
+                else:
+                    semi_finish_total += total
+                
+                items.append({
+                    "inventory_id": inv.id,
+                    "name": inv.name,
+                    "stock": total
+                })
+
         return {
-            "message": "🔎 Products:",
-            "items": [r[0] for r in search_rows]
+            "type": "result",
+            "supplier": {
+                "id": supplier.id,
+                "name": supplier.supplier_name,
+                "code": supplier.supplier_code,
+                "email": supplier.email,
+                "gstin": supplier.gstin
+            },
+            "finish_stock": finish_total,
+            "semi_finish_stock": semi_finish_total,
+            "items": items
         }
 
-    # If show mode → ALWAYS LIST
-    if show_mode and search_rows:
-        return {
-            "message": "📦 Matching Products:",
-            "items": [r[0] for r in search_rows]
-        }
+    # =========================================================
+    # FEATURE 3: STANDARD INVENTORY MULTI-SEARCH (WITH ID SEARCH)
+    # =========================================================
+    final_output = []
+    
+    for p_name in products:
+        target = str(p_name).strip().lower()
+        
+        # 🟢 EXACT ID SEARCH
+        if target.isdigit():
+            inventories = db.execute(text("""
+                SELECT id, name, classification, unit, placement, height, width, thikness
+                FROM inventories WHERE id = :id
+            """), {"id": int(target)}).fetchall()
+            
+        # 🔵 STANDARD NAME SEARCH
+        else:
+            inventories = db.execute(text("""
+                SELECT id, name, classification, unit, placement, height, width, thikness
+                FROM inventories WHERE LOWER(name) LIKE LOWER(:q) ORDER BY name LIMIT 5
+            """), {"q": f"%{target}%"}).fetchall()
 
-    # =====================================================
-    # STEP 2 — EXACT STOCK ONLY IF SINGLE
-    # =====================================================
-    q = spell_correct(q, db)
+            # FUZZY SEARCH FALLBACK
+            if not inventories:
+                all_rows = db.execute(text("SELECT name FROM inventories")).fetchall()
+                names = [r[0] for r in all_rows]
+                match = process.extractOne(target, names, scorer=fuzz.token_set_ratio)
+                if match and match[1] >= 70:
+                    inventories = db.execute(text("""
+                        SELECT id, name, classification, unit, placement, height, width, thikness
+                        FROM inventories WHERE name = :n
+                    """), {"n": match[0]}).fetchall()
 
-    rows = db.execute(
-        text("""
-        SELECT i.name,
-        COALESCE(SUM(
-            CASE
-            WHEN LOWER(st.txn_type)='in' THEN st.quantity
-            WHEN LOWER(st.txn_type)='out' THEN -st.quantity
-            ELSE 0 END),0) AS stock
-        FROM inventories i
-        LEFT JOIN stock_transactions st ON i.id=st.inventory_id
-        WHERE LOWER(i.name) = LOWER(:q)
-        GROUP BY i.name
-        """),
-        {"q": q}
-    ).fetchall()
+        if len(inventories) > 1:
+            final_output.append({
+                "product_requested": target,
+                "type": "dropdown",
+                "message": f"Multiple matches found for '{target}':",
+                "items": [{"id": i.id, "name": i.name} for i in inventories]
+            })
+        elif len(inventories) == 1:
+            inv = inventories[0]
+            txns = db.execute(text("SELECT txn_type, ref_type, quantity FROM stock_transactions WHERE inventory_id = :id"), {"id": inv.id}).fetchall()
 
-    if not rows:
-        return {"message": f"❌ '{q}' not found."}
+            in_qty, out_qty, finish_in, machining_out = 0, 0, 0, 0
+            for t in txns:
+                tt, rt, qty = (t[0] or "").lower(), (t[1] or "").lower(), float(t[2] or 0)
+                if tt == "in" and rt != "finish": in_qty += qty
+                if tt == "out" and rt != "machining": out_qty += qty
+                if tt == "in" and rt == "finish": finish_in += qty
+                if tt == "out" and rt == "machining": machining_out += qty
 
-    name, stock = rows[0]
-    stock = int(stock)
+            cls = (inv.classification or "").upper().strip()
+            m_stock, sf_stock, f_stock = 0, 0, 0
+            total = in_qty - out_qty
 
-    if stock > 0:
-        return {"message": f"📦 {name} → ✅ {stock} available"}
-    else:
-        return {"message": f"📦 {name} → ❌ Out of stock"}
+            if cls in ["", "FINISH", "NULL"]: f_stock = total
+            elif cls == "SEMI_FINISH":
+                mc, fn = (machining_out - finish_in), (finish_in - out_qty)
+                m_stock, f_stock = mc, fn
+                sf_stock = total - mc - fn
+            else: f_stock = in_qty - finish_in
 
+            final_output.append({
+                "type": "result",
+                "inventory": {"id": inv.id, "name": inv.name, "classification": cls},
+                "stock": {"machining": m_stock, "finish": f_stock, "semi_finish": sf_stock, "total": total}
+            })
+        else:
+            final_output.append({"product_requested": target, "message": f"❌ '{target}' not found."})
 
-
-# -------------------------------------------------
-# AUTOCOMPLETE
-# -------------------------------------------------
-@router.post("/suggest")
-def suggest_products(request: ChatRequest, db: Session = Depends(get_db)):
-
-    q = request.query.strip()
-
-    if len(q) < 2:
-        return {"suggestions": []}
-
-    rows = db.execute(
-        text("""
-            SELECT DISTINCT name
-            FROM inventories
-            WHERE LOWER(name) LIKE LOWER(:q)
-            ORDER BY name
-            LIMIT 10
-        """),
-        {"q": f"%{q}%"}
-    ).fetchall()
-
-    return {"suggestions": [r[0] for r in rows]}
+    return {"results": final_output}

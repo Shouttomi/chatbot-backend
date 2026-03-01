@@ -1,16 +1,27 @@
 import ollama
 import json
 import re
+import os # Add this
+from dotenv import load_dotenv # Add this
+
+load_dotenv() # Load the .env file
 
 # --- CONFIGURATION ---
 MODEL_NAME = "gemma3:4b"
 
 # --- 1. SETUP OLLAMA CLIENT ---
-# We create this globally so it is ready when the server starts
 try:
-    client = ollama.Client(host='http://localhost:11434')
+    # Read securely from .env
+    ollama_api_key = os.getenv("OLLAMA_API_KEY")
+
+    client = ollama.Client(
+        host='https://ollama.com',
+        headers={'Authorization': f'Bearer {ollama_api_key}'}
+    )
+    print("☁️ Connected to Ollama Cloud!")
+
 except Exception as e:
-    print(f"⚠️ Warning: Could not connect to Ollama. Ensure it is running. {e}")
+    print(f"⚠️ Warning: Could not connect to Ollama. {e}")
     client = None
 
 # --- 2. HELPER FUNCTIONS ---
@@ -21,22 +32,34 @@ def clean_json_string(text: str):
 
 def ask_ollama(user_text: str):
     """
-    Extracts Intent and a LIST of products.
-    Input: "Check stock for bearing and v belt"
-    Output: {"intent": "stock", "products": ["bearing", "v belt"]}
+    Enhanced extraction for multi-search and supplier intents.
     """
     SYSTEM_PROMPT = """
-    You are an ERP Assistant. extract USER INTENT and PRODUCT NAMES.
+    You are an ERP Assistant. Extract the USER INTENT and a LIST of exact PRODUCT/SUPPLIER NAMES.
+
+    RULES FOR EXTRACTION:
+    1. VALID INTENTS: 
+       - "stock": asking for quantity/availability of items.
+       - "search": looking for item details.
+       - "supplier_list": if the user ONLY types "supplier", "all suppliers", or "supplier list".
+       - "supplier_search": if the user asks for a specific supplier by ID or name (e.g., "supplier 1", "Mewar Supp").
+       - "greet": greetings.
     
-    RULES:
-    1. If user asks for multiple items (connected by 'and', '&', ','), split them.
-    2. VALID INTENTS: "stock", "search", "greet", "bye".
-    
+    2. EXTRACTION: Extract the core product or supplier name/ID into the "products" list. 
+       If the user says "supplier 1", extract "1". If "supplier Mewar", extract "Mewar".
+
     OUTPUT JSON FORMAT:
-    {"intent": "...", "products": ["item1", "item2"]}
+    {"intent": "...", "products": ["item1"]}
+
+    EXAMPLES:
+    User: "bearing aur v belt"
+    JSON: {"intent": "search", "products": ["bearing", "v belt"]}
     
-    Example: "bearing 6205 aur v belt ka stock"
-    JSON: {"intent": "stock", "products": ["bearing 6205", "v belt"]}
+    User: "supplier"
+    JSON: {"intent": "supplier_list", "products": []}
+    
+    User: "supplier 1"
+    JSON: {"intent": "supplier_search", "products": ["1"]}
     """
 
     if not client:
@@ -58,6 +81,4 @@ def ask_ollama(user_text: str):
 
     except Exception as e:
         print(f"🔴 AI Error: {e}")
-        # Fallback: Return the whole text as one product
         return {"intent": "search", "products": [user_text]}
-    
