@@ -7,3 +7,5 @@ python-dotenv
 rapidfuzz
 openai
 pydantic
+python-jose[cryptography]
+passlib[bcrypt]
