@@ -45,8 +45,11 @@ def ask_ollama(user_text: str):
        - "supplier_search": if the user asks for a specific supplier by ID or name (e.g., "supplier 1", "Mewar Supp").
        - "greet": greetings.
     
-    2. EXTRACTION: Extract the core product or supplier name/ID into the "products" list. 
-       If the user says "supplier 1", extract "1". If "supplier Mewar", extract "Mewar".
+    2. EXTRACTION: Extract the exact product names into the "products" list. 
+       CRITICAL RULE: DO NOT drop sizes, dimensions, or numbers! 
+       - If user says "Allen Bolt 10x50", extract EXACTLY "Allen Bolt 10x50".
+       - If user says "bearing 2216", extract EXACTLY "bearing 2216".
+       - If user says "supplier 1", extract "1". If "supplier Mewar", extract "Mewar".
 
     OUTPUT JSON FORMAT:
     {"intent": "...", "products": ["item1"]}
@@ -54,6 +57,9 @@ def ask_ollama(user_text: str):
     EXAMPLES:
     User: "bearing aur v belt"
     JSON: {"intent": "search", "products": ["bearing", "v belt"]}
+    
+    User: "Allen Bolt 10x50 chahiye"
+    JSON: {"intent": "search", "products": ["Allen Bolt 10x50"]}
     
     User: "supplier"
     JSON: {"intent": "supplier_list", "products": []}
