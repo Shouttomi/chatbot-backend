@@ -26,11 +26,22 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
         return {"message": "Hello! 🙏 I am the Mewar ERP AI. How can I help you today?"}
 
     # =========================================================
-    # 2. AI EXTRACTION
+    # 2. THE ERP FAILSAFE: DATABASE FIRST, AI SECOND
     # =========================================================
-    ai_data = ask_ollama(raw_q)
-    intent = ai_data.get("intent", "search")
-    products = ai_data.get("products", [])
+    # We check the inventory table first. If a match exists, we bypass AI guessing.
+    direct_inv_check = db.execute(text("""
+        SELECT id FROM inventories WHERE LOWER(name) LIKE LOWER(:q) LIMIT 1
+    """), {"q": f"%{low_q}%"}).fetchall()
+
+    if direct_inv_check and "supplier" not in low_q:
+        # 🟢 DIRECT HIT: Force inventory search to avoid AI supplier errors
+        intent = "search"
+        products = [low_q]
+    else:
+        # 🟡 AI FALLBACK: Used for complex questions or supplier lookups
+        ai_data = ask_ollama(raw_q)
+        intent = ai_data.get("intent", "search")
+        products = ai_data.get("products", [])
 
     # =========================================================
     # FEATURE 1: SHOW ALL SUPPLIERS
@@ -47,15 +58,12 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
         return {"message": "Please specify the items or supplier you are looking for."}
 
     # =========================================================
-    # FEATURE 2: SUPPLIER SMART SEARCH (YOUR CUSTOM LOGIC)
+    # FEATURE 2: SUPPLIER SMART SEARCH
     # =========================================================
     if intent == "supplier_search" or low_q.startswith("supplier "):
-        # Extract ID or Name safely
         q = str(products[0]).strip().lower() if products else low_q.replace("supplier", "").strip()
-        if low_q.startswith("supplier ") and q == low_q:
-            q = low_q.replace("supplier", "").strip()
-
-        # Find the Supplier
+        
+        # Find the Supplier (Increased to 10 for better visibility)
         if q.isdigit():
             suppliers = db.execute(text("""
                 SELECT id, supplier_name, supplier_code, email, gstin
@@ -69,7 +77,6 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
                 ORDER BY supplier_name LIMIT 10
             """), {"q": f"%{q}%"}).fetchall()
 
-        # Handle Multiple or None
         if len(suppliers) > 1:
             return {
                 "type": "dropdown",
@@ -79,153 +86,81 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
         if not suppliers:
             return {"message": f"Supplier '{q}' not found."}
 
-        # --- YOUR EXACT SUPPLIER INVENTORY LOOP LOGIC ---
+        # --- GET SUPPLIER INVENTORY ---
         supplier = suppliers[0]
-        supplier_id = supplier.id
-
         inventories = db.execute(text("SELECT id, name, classification FROM inventories ORDER BY name")).fetchall()
         
-        finish_total = 0
-        semi_finish_total = 0
-        items = []
+        finish_total, semi_finish_total, items = 0, 0, []
 
         for inv in inventories:
             txns = db.execute(text("""
                 SELECT txn_type, ref_type, quantity FROM stock_transactions
                 WHERE inventory_id = :inv_id AND supplier_id = :supplier_id
-            """), {"inv_id": inv.id, "supplier_id": supplier_id}).fetchall()
+            """), {"inv_id": inv.id, "supplier_id": supplier.id}).fetchall()
 
-            in_qty, out_qty, finish_in, machining_out = 0, 0, 0, 0
+            in_qty, out_qty = 0, 0
             for t in txns:
-                txn_type = (t.txn_type or "").lower()
-                ref_type = (t.ref_type or "").lower()
                 qty = float(t.quantity or 0)
-                
-                if txn_type == "in" and ref_type != "finish": in_qty += qty
-                if txn_type == "out" and ref_type != "machining": out_qty += qty
-                if txn_type == "in" and ref_type == "finish": finish_in += qty
-                if txn_type == "out" and ref_type == "machining": machining_out += qty
+                if t.txn_type.lower() == "in": in_qty += qty
+                if t.txn_type.lower() == "out": out_qty += qty
 
-            classification = (inv.classification or "").upper().strip()
             total = in_qty - out_qty
-            
-            # FILTER ZERO STOCK
             if total != 0:
-                if classification == "FINISH" or classification in ["", "NULL"]:
-                    finish_total += total
-                else:
-                    semi_finish_total += total
-                
-                items.append({
-                    "inventory_id": inv.id,
-                    "name": inv.name,
-                    "stock": total
-                })
+                classification = (inv.classification or "").upper().strip()
+                if classification == "FINISH" or not classification: finish_total += total
+                else: semi_finish_total += total
+                items.append({"inventory_id": inv.id, "name": inv.name, "stock": total})
 
         return {
             "type": "result",
-            "supplier": {
-                "id": supplier.id,
-                "name": supplier.supplier_name,
-                "code": supplier.supplier_code,
-                "email": supplier.email,
-                "gstin": supplier.gstin
-            },
-            "finish_stock": finish_total,
-            "semi_finish_stock": semi_finish_total,
-            "items": items
+            "supplier": {"id": supplier.id, "name": supplier.supplier_name, "code": supplier.supplier_code},
+            "finish_stock": finish_total, "semi_finish_stock": semi_finish_total, "items": items
         }
 
     # =========================================================
-    # FEATURE 3: STANDARD INVENTORY MULTI-SEARCH (WITH ID SEARCH)
+    # FEATURE 3: STANDARD INVENTORY MULTI-SEARCH
     # =========================================================
     final_output = []
     
     for p_name in products:
         target = str(p_name).strip().lower()
         
-        # 🟢 EXACT ID SEARCH
         if target.isdigit():
-            inventories = db.execute(text("""
-                SELECT id, name, classification, unit, placement, height, width, thikness
-                FROM inventories WHERE id = :id
-            """), {"id": int(target)}).fetchall()
-            
-        # 🔵 STANDARD NAME SEARCH
+            inventories = db.execute(text("SELECT * FROM inventories WHERE id = :id"), {"id": int(target)}).fetchall()
         else:
+            # 🚀 INCREASED LIMIT TO 10 FOR DROPDOWN 🚀
             inventories = db.execute(text("""
                 SELECT id, name, classification, unit, placement, height, width, thikness
-                FROM inventories WHERE LOWER(name) LIKE LOWER(:q) ORDER BY name LIMIT 5
+                FROM inventories WHERE LOWER(name) LIKE LOWER(:q) ORDER BY name LIMIT 10
             """), {"q": f"%{target}%"}).fetchall()
 
-            # FUZZY SEARCH FALLBACK (Auto-corrects minor typos like "diamoud")
-            if not inventories:
-                all_rows = db.execute(text("SELECT name FROM inventories")).fetchall()
-                names = [r[0] for r in all_rows]
-                match = process.extractOne(target, names, scorer=fuzz.token_set_ratio)
-                if match and match[1] >= 70:
-                    inventories = db.execute(text("""
-                        SELECT id, name, classification, unit, placement, height, width, thikness
-                        FROM inventories WHERE name = :n
-                    """), {"n": match[0]}).fetchall()
-
-        # =========================================================
-        # PROCESS RESULTS FOR THIS ITEM
-        # =========================================================
+        # PROCESS RESULTS
         if len(inventories) > 1:
             final_output.append({
                 "product_requested": target,
                 "type": "dropdown",
-                "message": f"Multiple matches found for '{target}':",
+                "message": f"Found {len(inventories)} matches for '{target}':",
                 "items": [{"id": i.id, "name": i.name} for i in inventories]
             })
         elif len(inventories) == 1:
             inv = inventories[0]
-            txns = db.execute(text("SELECT txn_type, ref_type, quantity FROM stock_transactions WHERE inventory_id = :id"), {"id": inv.id}).fetchall()
-
-            in_qty, out_qty, finish_in, machining_out = 0, 0, 0, 0
-            for t in txns:
-                tt, rt, qty = (t[0] or "").lower(), (t[1] or "").lower(), float(t[2] or 0)
-                if tt == "in" and rt != "finish": in_qty += qty
-                if tt == "out" and rt != "machining": out_qty += qty
-                if tt == "in" and rt == "finish": finish_in += qty
-                if tt == "out" and rt == "machining": machining_out += qty
-
-            cls = (inv.classification or "").upper().strip()
-            m_stock, sf_stock, f_stock = 0, 0, 0
-            total = in_qty - out_qty
-
-            if cls in ["", "FINISH", "NULL"]: f_stock = total
-            elif cls == "SEMI_FINISH":
-                mc, fn = (machining_out - finish_in), (finish_in - out_qty)
-                m_stock, f_stock = mc, fn
-                sf_stock = total - mc - fn
-            else: f_stock = in_qty - finish_in
-
+            txns = db.execute(text("SELECT txn_type, quantity FROM stock_transactions WHERE inventory_id = :id"), {"id": inv.id}).fetchall()
+            
+            total = sum(float(t.quantity) if t.txn_type.lower() == "in" else -float(t.quantity) for t in txns)
             final_output.append({
                 "type": "result",
-                "inventory": {"id": inv.id, "name": inv.name, "classification": cls},
-                "stock": {"machining": m_stock, "finish": f_stock, "semi_finish": sf_stock, "total": total}
+                "inventory": {"id": inv.id, "name": inv.name, "classification": (inv.classification or "").upper()},
+                "stock": {"total": total}
             })
-            
-        # ✅ YOUR NEW SMART SUGGESTIONS BLOCK ✅
         else:
-            # =========================================================
-            # 🚀 SMART SUGGESTIONS (INSTEAD OF JUST "NOT FOUND")
-            # =========================================================
+            # FUZZY SUGGESTIONS (Auto-fallback)
             all_rows = db.execute(text("SELECT name FROM inventories")).fetchall()
             names = [r[0] for r in all_rows]
-            
-            # Find the top 5 closest matches in the database, even if the score is low
-            closest_matches = process.extract(target, names, scorer=fuzz.token_set_ratio, limit=5)
-            
-            # Extract just the names from the RapidFuzz tuple
-            suggested_names = [m[0] for m in closest_matches] if closest_matches else names[:5]
-
+            closest = process.extract(target, names, limit=10)
             final_output.append({
                 "product_requested": target,
-                "message": f"❌ '{target}' not found. Did you mean one of these?",
-                "suggestions": suggested_names
+                "message": f"❌ '{target}' not found. Did you mean:",
+                "suggestions": [m[0] for m in closest]
             })
 
     return {"results": final_output}
