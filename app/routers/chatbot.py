@@ -5,9 +5,8 @@ from app.db.database import get_db
 from app.schemas.chat import ChatRequest
 from app.dependencies import get_current_user
 import re
-
+import difflib
 from app.services.ollama_engine import ask_ollama
-from rapidfuzz import process, fuzz
 
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 
@@ -15,176 +14,186 @@ router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
     raw_q = request.query.strip()
     low_q = raw_q.lower()
-
-    # =========================================================
-    # 1. SMART GREETING INTERCEPTOR
-    # =========================================================
-    greeting_phrases = ["hi", "hello", "hey", "namaste", "namaskar", "ram ram", "khamma ghani", "good morning", "good evening"]
-    clean_greet = re.sub(r'\b(bhai|sir|ji|bro|ai|bot|yaar|please)\b', '', low_q).strip()
     
-    if clean_greet in greeting_phrases or low_q in greeting_phrases:
-        return {"message": "Ram Ram! 🙏 I am the Mewar ERP Intelligence Layer. Kya dekhna hai aaj? (What shall we look for today?)"}
+    # 🚀 STEP 1: EXACT STOCK MATCH (Bypass AI for speed)
+    exact_match = db.execute(text("""
+        SELECT id, name, classification FROM inventories 
+        WHERE LOWER(name) = :exact OR id = :id_val
+    """), {"exact": low_q, "id_val": int(low_q) if low_q.isdigit() else -1}).fetchone()
 
-    # =========================================================
-    # 2. AI INTENT
-    # =========================================================
-    chat_history = getattr(request, "history", []) 
-    ai_data = ask_ollama(raw_q, chat_history)
+    if exact_match:
+        inv = exact_match
+        txns = db.execute(text("SELECT txn_type, quantity FROM stock_transactions WHERE inventory_id = :id"), {"id": inv.id}).fetchall()
+        m, f, sf = 0, 0, 0
+        cls = str(inv.classification).lower() if inv.classification else ""
+        for t in txns:
+            val = float(t.quantity or 0) * (1 if str(t.txn_type).lower() == "in" else -1)
+            if "machining" in cls: m += val
+            elif "semi" in cls: sf += val
+            else: f += val
+        
+        return {"results": [{
+            "type": "result",
+            "inventory": {"id": inv.id, "name": inv.name, "classification": cls.upper()},
+            "machining_stock": m, "finish_stock": f, "semi_finish_stock": sf, "total_stock": (m + f + sf)
+        }]}
+
+    # 🚀 STEP 2: AI INTENT & SUPPLIER LOGIC
+    ai_data = ask_ollama(raw_q, getattr(request, "history", []))
     intent = ai_data.get("intent", "search")
-    specific = ai_data.get("specific_items", [])
-    general = ai_data.get("general_categories", [])
-
-    # =========================================================
-    # FEATURE 1: ANALYTICAL
-    # =========================================================
-    if intent == "analytical":
-        target = specific[0] if specific else (general[0] if general else None)
-        if target:
-            results = db.execute(text("""
-                SELECT s.supplier_name, i.name as item_name, 
-                       SUM(CASE WHEN LOWER(t.txn_type) = 'in' THEN t.quantity ELSE -t.quantity END) as total_stock
-                FROM stock_transactions t
-                JOIN suppliers s ON t.supplier_id = s.id
-                JOIN inventories i ON t.inventory_id = i.id
-                WHERE LOWER(i.name) LIKE LOWER(:q)
-                GROUP BY s.id, i.id
-                HAVING SUM(CASE WHEN LOWER(t.txn_type) = 'in' THEN t.quantity ELSE -t.quantity END) > 0
-                ORDER BY total_stock DESC LIMIT 5
-            """), {"q": f"%{target}%"}).fetchall()
-
-            if results:
-                return {
-                    "type": "analytical_result",
-                    "message": f"📊 Stock comparison for '{target}':",
-                    "data": [{"supplier": r.supplier_name, "item": r.item_name, "stock": float(r.total_stock)} for r in results]
-                }
-
-    # =========================================================
-    # FEATURE 2: SUPPLIER DIRECTORY & SMART FALLBACK
-    # =========================================================
-    supplier_keywords = ["supplier", "sup-", "email", "gstin", "phone", "contact"]
     
-    if intent in ["supplier_list", "supplier_search"] or any(k in low_q for k in supplier_keywords):
-        
-        if intent == "supplier_list" or "all " in low_q or "list" in low_q:
-            suppliers = db.execute(text("SELECT id, supplier_name, supplier_code FROM suppliers LIMIT 50")).fetchall()
-            return {
-                "type": "supplier_list",
-                "message": "📋 Active Suppliers Directory:",
-                "suppliers": [{"id": s.id, "name": s.supplier_name, "code": s.supplier_code} for s in suppliers]
-            }
+    # 👋 GREETINGS INTERCEPTOR
+    greetings = ["hi", "hello", "hey", "good morning", "good evening", "namaste", "how are you"]
+    if intent == "greeting" or any(low_q == g or low_q.startswith(g + " ") for g in greetings):
+        return {"results": [{"message": "Hello! 👋 I am your Mewar ERP Assistant. I can help you check stock levels, item ledgers, and supplier details. What do you need today?"}]}
 
-        supplier = None
+    suppliers_found = []
+    clean_s = ""
 
-        if "who" in low_q or "their" in low_q:
-            for msg in reversed(chat_history):
-                if msg.get("role") == "user":
-                    past_digits = re.findall(r'\b\d+\b', msg.get("content", ""))
-                    if past_digits:
-                        last_id = int(past_digits[-1])
-                        sup_row = db.execute(text("""
-                            SELECT s.* FROM suppliers s 
-                            JOIN stock_transactions t ON s.id = t.supplier_id 
-                            WHERE t.inventory_id = :id LIMIT 1
-                        """), {"id": last_id}).fetchone()
-                        if sup_row: supplier = sup_row
-                        break
+    # 🎯 SNIPER MODE: Catch 'sup-100' or 'sup 100'
+    code_match = re.search(r'(sup[-\s]\d+)', low_q)
+    if code_match:
+        clean_s = code_match.group(1).replace(" ", "-")
+        suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE LOWER(supplier_code) = :exact LIMIT 1"), {"exact": clean_s}).fetchall()
+    
+    # 🧹 SWEEPER MODE
+    if not suppliers_found:
+        noise = r'\b(bhai|kya|status|hai|aaj|what|is|the|stock|for|who|email|gstin|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|supplier|suppliers)\b'
+        clean_s = re.sub(noise, '', low_q).strip()
+        clean_s = re.sub(r'[^\w\s-]', '', clean_s).strip()
+        clean_s = re.sub(r'\s+', ' ', clean_s)
 
-        if not supplier:
-            all_suppliers = db.execute(text("SELECT * FROM suppliers")).fetchall()
-            best_score = 0
-            
-            for sup in all_suppliers:
-                name = str(sup.supplier_name).lower()
-                code = str(sup.supplier_code).lower()
+        if clean_s:
+            if clean_s.isdigit():
+                suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE id = :id LIMIT 10"), {"id": int(clean_s)}).fetchall()
+            else:
+                suppliers_found = db.execute(text("""
+                    SELECT * FROM suppliers 
+                    WHERE LOWER(supplier_name) LIKE :q OR LOWER(supplier_code) LIKE :q LIMIT 10
+                """), {"q": f"%{clean_s}%"}).fetchall()
                 
-                if name.split()[0] in low_q or code in low_q:
-                    supplier = sup
-                    break
-                    
-                score = fuzz.token_set_ratio(low_q, name)
-                if score > best_score:
-                    best_score = score
-                    if score >= 70: supplier = sup
+                # 🪄 SPELL-CHECKER
+                if not suppliers_found:
+                    all_s = db.execute(text("SELECT id, supplier_name FROM suppliers")).fetchall()
+                    s_names = {s.supplier_name.lower(): s.id for s in all_s}
+                    matches = difflib.get_close_matches(clean_s, s_names.keys(), n=1, cutoff=0.6)
+                    if matches:
+                        best_match_id = s_names[matches[0]]
+                        suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE id = :id LIMIT 1"), {"id": best_match_id}).fetchall()
 
-        if not supplier:
-            suppliers = db.execute(text("SELECT id, supplier_name, supplier_code FROM suppliers LIMIT 50")).fetchall()
-            return {
-                "type": "supplier_list",
-                "message": "🤷‍♂️ You didn't mention which company! Here is our supplier directory. Who are you looking for?",
-                "suppliers": [{"id": s.id, "name": s.supplier_name, "code": s.supplier_code} for s in suppliers]
-            }
+    is_supplier_intent = intent in ["supplier_search", "supplier_list"] or any(k in low_q for k in ["email", "gstin", "supplier", "sup-", "sup "])
 
-        items = []
-        finish_stock, semi_finish_stock = 0, 0
-        inv_rows = db.execute(text("SELECT id, name, classification FROM inventories")).fetchall()
-        for inv in inv_rows:
-            txns = db.execute(text("SELECT txn_type, quantity FROM stock_transactions WHERE inventory_id = :inv_id AND supplier_id = :sup_id"), {"inv_id": inv.id, "sup_id": supplier.id}).fetchall()
-            total = sum(float(t.quantity or 0) if str(t.txn_type).lower() == "in" else -float(t.quantity or 0) for t in txns)
-            if total != 0:
-                items.append({"inventory_id": inv.id, "name": inv.name, "stock": total})
-                c_type = str(inv.classification).lower() if inv.classification else "finish"
-                if "semi" in c_type: semi_finish_stock += total
-                else: finish_stock += total
-
-        return {
-            "type": "result", "message": f"Details for {supplier.supplier_name}:",
-            "supplier": {"id": supplier.id, "name": supplier.supplier_name, "code": supplier.supplier_code, "email": supplier.email, "gstin": supplier.gstin},
-            "finish_stock": finish_stock, "semi_finish_stock": semi_finish_stock, "items": items
-        }
-
-    # =========================================================
-    # FEATURE 3: INVENTORY SEARCH (Now with Placements & Dimensions)
-    # =========================================================
-    final_output = []
-    filtered_general = [g for g in general if not any(g in s for s in specific)]
-    search_tasks = [{"name": p, "is_specific": True} for p in specific] + [{"name": p, "is_specific": False} for p in filtered_general]
-    if not search_tasks: search_tasks = [{"name": low_q, "is_specific": False}]
-
-    for task in search_tasks:
-        target = str(task["name"]).strip().lower()
-        is_specific = task["is_specific"]
-        inventories = []
+    if suppliers_found or is_supplier_intent:
         
-        clean_id = target.replace("id ", "").replace("#", "").strip()
-        if clean_id.isdigit():
-            inventories = db.execute(text("SELECT id, name, classification, unit, placement, height, width, thickness FROM inventories WHERE id = :id"), {"id": int(clean_id)}).fetchall()
-            if inventories: is_specific = True
-
-        if not inventories:
-            inventories = db.execute(text("SELECT id, name, classification, unit, placement, height, width, thickness FROM inventories WHERE LOWER(name) REGEXP :q ORDER BY name LIMIT 15"), {"q": rf"\b{re.escape(target)}\b"}).fetchall()
-
-        if not inventories:
-            all_names = [r.name for r in db.execute(text("SELECT name FROM inventories")).fetchall()]
-            best_match = process.extractOne(target, all_names, scorer=fuzz.WRatio)
-            if best_match and best_match[1] >= 85:
-                inventories = db.execute(text("SELECT id, name, classification, unit, placement, height, width, thickness FROM inventories WHERE name = :n"), {"n": best_match[0]}).fetchall()
-                is_specific = True
-
-        if len(inventories) > 1 and not is_specific:
-            final_output.append({"product_requested": target, "type": "dropdown", "message": f"I found several matching '{target}':", "items": [{"id": i.id, "name": i.name} for i in inventories]})
-        elif inventories:
-            inv = inventories[0]
-            txns = db.execute(text("SELECT txn_type, quantity FROM stock_transactions WHERE inventory_id = :id"), {"id": inv.id}).fetchall()
-            total = sum(float(t.quantity or 0) if str(t.txn_type).lower() == "in" else -float(t.quantity or 0) for t in txns)
+        # 🟡 CASE A: MULTIPLE SUPPLIERS
+        if len(suppliers_found) > 1:
+            return {"results": [{
+                "type": "supplier_list",
+                "message": f"I found multiple suppliers for '{clean_s}'. Please select one:",
+                "suppliers": [{"id": s.id, "name": f"{s.supplier_name} ({s.supplier_code or 'N/A'})"} for s in suppliers_found]
+            }]}
             
-            final_output.append({
-                "type": "result", 
-                "inventory": {
-                    "id": inv.id, 
-                    "name": inv.name, 
-                    "classification": (inv.classification or "FINISH").upper(),
-                    "unit": inv.unit or "NOS",
-                    "placement": inv.placement or "N/A",
-                    "height": inv.height or 0,
-                    "width": inv.width or 0,
-                    "thickness": inv.thickness or 0
-                }, 
-                "stock": {"total": total}
-            })
-        else:
-            all_rows = db.execute(text("SELECT name FROM inventories")).fetchall()
-            closest = process.extract(target, [r[0] for r in all_rows], limit=5)
-            final_output.append({"type": "suggestion", "message": f"❌ '{target}' not found.", "suggestions": [m[0] for m in closest if m[1] > 50]})
+        # 🔵 CASE B: EXACTLY ONE SUPPLIER (Ledger Math)
+        elif len(suppliers_found) == 1:
+            supplier = suppliers_found[0]
+            inventories = db.execute(text("""
+                SELECT DISTINCT i.id, i.name, i.classification
+                FROM inventories i
+                JOIN stock_transactions st ON i.id = st.inventory_id
+                WHERE st.supplier_id = :sid
+            """), {"sid": supplier.id}).fetchall()
 
-    return {"results": final_output}
+            finish_total, semi_finish_total = 0, 0
+            items = []
+
+            for inv in inventories:
+                txns = db.execute(text("""
+                    SELECT txn_type, ref_type, quantity
+                    FROM stock_transactions
+                    WHERE inventory_id = :inv_id AND supplier_id = :supplier_id
+                """), {"inv_id": inv.id, "supplier_id": supplier.id}).fetchall()
+
+                in_qty, out_qty, finish_in, machining_out = 0, 0, 0, 0
+
+                for t in txns:
+                    txn_type = (t.txn_type or "").lower()
+                    ref_type = (t.ref_type or "").lower()
+                    qty = float(t.quantity or 0)
+
+                    if txn_type == "in" and ref_type != "finish": in_qty += qty
+                    if txn_type == "out" and ref_type != "machining": out_qty += qty
+                    if txn_type == "in" and ref_type == "finish": finish_in += qty
+                    if txn_type == "out" and ref_type == "machining": machining_out += qty
+
+                classification = (inv.classification or "").upper().strip()
+                total = in_qty - out_qty
+
+                if total != 0:
+                    if classification == "FINISH": finish_total += total
+                    else: semi_finish_total += total
+                    items.append({"inventory_id": inv.id, "name": inv.name, "stock": total})
+
+            return {"results": [{
+                "type": "result", 
+                "supplier": {
+                    "id": supplier.id,
+                    "name": supplier.supplier_name, 
+                    "code": getattr(supplier, 'supplier_code', 'N/A'),
+                    "email": getattr(supplier, 'email', 'N/A'), 
+                    "gstin": getattr(supplier, 'gstin', 'N/A')
+                },
+                "finish_stock": finish_total,
+                "semi_finish_stock": semi_finish_total,
+                "items": items,
+                "message": f"Details for {supplier.supplier_name}"
+            }]}
+            
+        # 🟡 CASE C: NO SUPPLIER FOUND (Fallback Menu)
+        else:
+            msg = "Which supplier are you looking for? Please select from the list:" if not clean_s else f"I couldn't find a supplier matching '{clean_s}'. Select from list:"
+            all_s = db.execute(text("SELECT id, supplier_name, supplier_code FROM suppliers LIMIT 5")).fetchall()
+            return {"results": [{
+                "type": "supplier_list", 
+                "message": msg,
+                "suppliers": [{"id": s.id, "name": f"{s.supplier_name} ({s.supplier_code or 'N/A'})"} for s in all_s]
+            }]}
+
+    # 🚀 STEP 3: GENERAL INVENTORY SEARCH
+    search_targets = ai_data.get("specific_items", [])
+    if not search_targets: search_targets = [low_q]
+    
+    final_output = []
+    for target in search_targets:
+        t_str = str(target).strip().lower()
+        inv_res = db.execute(text("""
+            SELECT id, name, classification FROM inventories 
+            WHERE LOWER(name) REGEXP :q LIMIT 10
+        """), {"q": rf"\b{re.escape(t_str)}\b"}).fetchall()
+
+        if len(inv_res) == 1:
+            inv = inv_res[0]
+            txns = db.execute(text("SELECT txn_type, quantity FROM stock_transactions WHERE inventory_id = :id"), {"id": inv.id}).fetchall()
+            m, f, sf = 0, 0, 0
+            cls = str(inv.classification).lower() if inv.classification else ""
+            for t in txns:
+                val = float(t.quantity or 0) * (1 if str(t.txn_type).lower() == "in" else -1)
+                if "machining" in cls: m += val
+                elif "semi" in cls: sf += val
+                else: f += val
+            
+            return {"results": [{
+                "type": "result",
+                "inventory": {"id": inv.id, "name": inv.name, "classification": cls.upper()},
+                "machining_stock": m, "finish_stock": f, "semi_finish_stock": sf, "total_stock": (m + f + sf)
+            }]}
+            
+        elif len(inv_res) > 1:
+            final_output.append({
+                "type": "dropdown", "message": f"Select an item for '{target}':",
+                "items": [{"id": i.id, "name": i.name} for i in inv_res]
+            })
+            
+    if final_output:
+        return {"results": [final_output[0]]}
+        
+    return {"results": [{"message": "I couldn't find that item in the database."}]}
