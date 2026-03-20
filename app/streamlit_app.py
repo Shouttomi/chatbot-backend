@@ -5,7 +5,7 @@ import pandas as pd
 # ==========================================
 # 🚀 STRICTLY LOCALHOST CONFIGURATION
 # ==========================================
-API_BASE = "http://localhost:8000"
+API_BASE = "https://mewar-erp.vercel.app"
 CHAT_URL = f"{API_BASE}/chatbot/"
 LOGIN_URL = f"{API_BASE}/auth/login"
 
