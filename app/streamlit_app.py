@@ -48,11 +48,23 @@ def render_bot_response(data, msg_idx):
             
             st.caption(f"Item ID: #{inv['id']} | Category: {inv.get('classification', 'N/A')}")
         
-        # 🔵 CASE 2: SUPPLIER MATCH
+        # 🔵 CASE 2: SUPPLIER MATCH (UPDATED WITH ITEMS LIST)
         elif res_type == "result" and "supplier" in res:
             sup = res["supplier"]
             st.info(f"🏭 **{sup['name']}**")
-            st.markdown(f"**Email:** {sup.get('email', 'N/A')}  \n**GSTIN:** {sup.get('gstin', 'N/A')}")
+            
+            # Safe checking for None values in DB
+            email = sup.get('email') if sup.get('email') else 'N/A'
+            gstin = sup.get('gstin') if sup.get('gstin') else 'N/A'
+            st.markdown(f"**Email:** {email}  \n**GSTIN:** {gstin}")
+            
+            # Show items supplied by this supplier
+            items = res.get("items", [])
+            if items:
+                st.write("---")
+                st.write("**📦 Inventory from this Supplier:**")
+                for item in items:
+                    st.write(f"- {item.get('name')}: **{item.get('stock')}** in stock")
             
         # 🟡 CASE 3: DROPDOWN MENU
         elif res_type == "dropdown":

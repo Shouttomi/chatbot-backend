@@ -38,7 +38,7 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
             "machining_stock": m, "finish_stock": f, "semi_finish_stock": sf, "total_stock": (m + f + sf)
         }]}
 
-    # 🚀 STEP 2: AI INTENT & SUPPLIER LOGIC
+    # 🚀 STEP 2: AI INTENT & RESTRICTED SUPPLIER LOGIC
     ai_data = ask_ollama(raw_q, getattr(request, "history", []))
     intent = ai_data.get("intent", "search")
     
@@ -50,14 +50,18 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
     suppliers_found = []
     clean_s = ""
 
-    # 🎯 SNIPER MODE (Suppliers)
+    # 🔒 OPT-IN SUPPLIER CHECK: Only search suppliers if they use specific words
+    supplier_keywords = ["supplier", "vendor", "party", "company", "email", "gstin", "sup-", "sup "]
+    is_supplier_intent = any(k in low_q for k in supplier_keywords) or intent in ["supplier_search", "supplier_list"]
+
+    # 🎯 SNIPER MODE (Always checks for explicit SUP- codes)
     code_match = re.search(r'(sup[-\s]\d+)', low_q)
     if code_match:
         clean_s = code_match.group(1).replace(" ", "-")
         suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE LOWER(supplier_code) = :exact LIMIT 1"), {"exact": clean_s}).fetchall()
     
-    # 🧹 SWEEPER & SPELL-CHECKER FOR SUPPLIERS
-    if not suppliers_found:
+    # 🧹 SWEEPER & SPELL-CHECKER (ONLY runs if the user explicitly meant a supplier)
+    elif is_supplier_intent:
         noise = r'\b(bhai|kya|status|hai|aaj|what|is|the|stock|for|who|email|gstin|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|supplier|suppliers)\b'
         clean_s = re.sub(noise, '', low_q).strip()
         clean_s = re.sub(r'[^\w\s-]', '', clean_s).strip()
@@ -79,8 +83,6 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
                     if matches:
                         best_match_id = s_names[matches[0]]
                         suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE id = :id LIMIT 1"), {"id": best_match_id}).fetchall()
-
-    is_supplier_intent = intent in ["supplier_search", "supplier_list"] or any(k in low_q for k in ["email", "gstin", "supplier", "sup-", "sup "])
 
     if suppliers_found or is_supplier_intent:
         if len(suppliers_found) > 1:
@@ -136,7 +138,7 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
     # 🚀 STEP 3: GENERAL INVENTORY SEARCH (NINJA CHOPPER + 0.4 SPELL-CHECKER)
     search_targets = ai_data.get("specific_items", [])
     
-    # 🧹 Clean the raw string just in case (Notice "and" is NOT in this list anymore!)
+    # 🧹 Clean the raw string
     inv_noise = r'\b(chahiye|kya|status|hai|aaj|what|is|the|stock|for|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|item)\b'
     clean_q = re.sub(inv_noise, '', low_q).strip()
     clean_q = re.sub(r'\s+', ' ', clean_q)
@@ -148,12 +150,12 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
         else:
             search_targets = [clean_q] if clean_q else [low_q]
     else:
-        # 🚨 AI SAFETY NET: If Groq missed the typo, force search the raw sentence too!
+        # 🚨 AI SAFETY NET
         if clean_q and clean_q not in search_targets:
             search_targets.append(clean_q)
     
     final_output = []
-    seen_ids = set() # Prevent duplicate cards
+    seen_ids = set() 
 
     for target in search_targets:
         t_str = str(target).strip()
@@ -170,22 +172,17 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
         # 🪄 THE NEW 0.4 CUTOFF SPELL-CHECKER
         if not inv_res:
             all_inv = db.execute(text("SELECT id, name, classification FROM inventories")).fetchall()
-            
-            # Map items to a list to prevent accidental overwrites
             inv_map = {}
             for i in all_inv:
                 c_name = str(i.name).lower().strip()
                 if c_name not in inv_map: inv_map[c_name] = []
                 inv_map[c_name].append(i)
                 
-            # 🔥 Super forgiving 0.4 cutoff for extreme typos like "vvbelt" or "coniyor"
             matches = difflib.get_close_matches(t_str, inv_map.keys(), n=5, cutoff=0.4)
-            
             if matches:
                 inv_res = []
                 for m in matches: inv_res.extend(inv_map[m])
 
-        # Filter out items we already generated a card for
         inv_res = [i for i in inv_res if i.id not in seen_ids]
 
         if len(inv_res) == 1:
@@ -215,7 +212,7 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
     if final_output:
         return {"results": final_output}
         
-    # 🆘 THE SUGGESTION MENU (If everything fails / gibberish is typed)
+    # 🆘 THE SUGGESTION MENU
     suggestions = db.execute(text("SELECT id, name FROM inventories LIMIT 5")).fetchall()
     
     if suggestions:
