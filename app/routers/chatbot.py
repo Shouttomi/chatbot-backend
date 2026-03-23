@@ -67,8 +67,14 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
         stock_data = list(stock_map.values())
         
         if report_type == "low_stock":
-            stock_data.sort(key=lambda x: x["Stock"])
-            title = "📉 Top 10 Lowest Stock Items"
+            # ✅ FIX: Ignore 0-stock items so the report shows actual active inventory running low
+            active_stock = [x for x in stock_data if x["Stock"] > 0]
+            if not active_stock: # Safety net just in case everything is 0
+                active_stock = stock_data
+                
+            active_stock.sort(key=lambda x: x["Stock"])
+            stock_data = active_stock
+            title = "📉 Top 10 Lowest Stock Items (Active)"
         else: 
             stock_data.sort(key=lambda x: x["Stock"], reverse=True)
             title = "📈 Top 10 Highest Stock Items"
@@ -174,12 +180,16 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
     
     inv_noise = r'\b(chahiye|kya|ki|status|hai|aaj|what|is|the|stock|for|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|item|supplier|suppliers|suplier|suppler|supllier|vendor|party|kon|list|all)\b'
     clean_q = re.sub(inv_noise, '', low_q).strip()
-    clean_q = re.sub(r'\s+', ' ', clean_q)
+    
+    # ✅ FIX: Strip standalone quantities (like '50' or '10') so they don't break the string search
+    clean_q = re.sub(r'\b\d+\b', '', clean_q)
+    clean_q = re.sub(r'\s+', ' ', clean_q).strip()
     
     if not search_targets: 
         if clean_q: 
-            if re.search(r'\b(and|or)\b|,', clean_q):
-                search_targets = [x.strip() for x in re.split(r'\s+and\s+|\s+or\s+|,', clean_q) if x.strip()]
+            # ✅ FIX: Added 'aur' to the split logic
+            if re.search(r'\b(and|or|aur)\b|,', clean_q):
+                search_targets = [x.strip() for x in re.split(r'\s+and\s+|\s+or\s+|\s+aur\s+|,', clean_q) if x.strip()]
             else:
                 search_targets = [clean_q]
     
@@ -249,11 +259,12 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
             "suppliers": [{"id": s.id, "name": f"{s.supplier_name} ({s.supplier_code or 'N/A'})"} for s in all_s]
          }]}
 
-    # 🆘 FALLBACK 2: RANDOM INVENTORY SUGGESTIONS
-    raw_suggestions = db.execute(text("SELECT id, name FROM inventories LIMIT 50")).fetchall()
+    # 🆘 FALLBACK 2: TRUE RANDOM INVENTORY SUGGESTIONS
+    # ✅ FIX: Removed LIMIT 50 to pull from the entire catalog for genuine randomness
+    all_suggestions = db.execute(text("SELECT id, name FROM inventories")).fetchall()
     
-    if raw_suggestions:
-        suggestions = random.sample(raw_suggestions, min(5, len(raw_suggestions)))
+    if all_suggestions:
+        suggestions = random.sample(all_suggestions, min(5, len(all_suggestions)))
         return {"results": [{
             "type": "dropdown",
             "message": "I couldn't find exactly what you typed. Did you mean one of these?",
