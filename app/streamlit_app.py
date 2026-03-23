@@ -48,21 +48,33 @@ def render_bot_response(data, msg_idx):
             
             st.caption(f"Item ID: #{inv['id']} | Category: {inv.get('classification', 'N/A')}")
         
-        # 🔵 CASE 2: SUPPLIER MATCH 
+        # 🔵 CASE 2: SUPPLIER MATCH (✅ UPDATED LOGIC HERE)
         elif res_type == "result" and "supplier" in res:
             sup = res["supplier"]
             st.info(f"🏭 **{sup['name']}**")
             
-            email = sup.get('email') if sup.get('email') else 'N/A'
-            gstin = sup.get('gstin') if sup.get('gstin') else 'N/A'
-            st.markdown(f"**Email:** {email}  \n**GSTIN:** {gstin}")
+            # Safely fetch all fields, default to 'N/A' if missing
+            code = sup.get('code', 'N/A')
+            email = sup.get('email', 'N/A')
+            gstin = sup.get('gstin', 'N/A')
+            mobile = sup.get('mobile', 'N/A')
+            city = sup.get('city', 'N/A')
+            state = sup.get('state', 'N/A')
             
-            items = res.get("items", [])
-            if items:
+            # Display all details cleanly
+            st.markdown(f"**Code:** {code}  \n**Mobile:** {mobile}  \n**Email:** {email}  \n**Location:** {city}, {state}  \n**GSTIN:** {gstin}")
+            
+            # Handle the Inventory List Display
+            if "items" in res:
                 st.write("---")
-                st.write("**📦 Inventory from this Supplier:**")
-                for item in items:
-                    st.write(f"- {item.get('name')}: **{item.get('stock')}** in stock")
+                items = res.get("items", [])
+                if items:
+                    st.write("**📦 Inventory from this Supplier:**")
+                    for item in items:
+                        st.write(f"- {item.get('name')}: **{item.get('stock')}** in stock")
+                else:
+                    # ✅ FIX: Shows this message if the supplier has 0 items right now
+                    st.info("📦 No active inventory currently in stock from this supplier.")
             
         # 🟡 CASE 3: DROPDOWN MENU
         elif res_type == "dropdown":
@@ -87,7 +99,7 @@ def render_bot_response(data, msg_idx):
                     args=(s['name'],)
                 )
 
-        # 📊 CASE 5: MANAGER ANALYTICS CHARTS (NEW)
+        # 📊 CASE 5: MANAGER ANALYTICS CHARTS
         elif res_type == "analytics_chart":
             st.subheader(res.get("title", "📊 Analytics Report"))
             

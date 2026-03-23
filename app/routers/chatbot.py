@@ -189,11 +189,18 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
                     else: semi_finish_total += total
                     items.append({"inventory_id": inv.id, "name": inv.name, "stock": total})
 
+            # 🛠️ HERE IS THE ONLY CHANGE: Adding state, city, and mobile to the output
             final_output.append({
                 "type": "result", 
                 "supplier": {
-                    "id": supplier.id, "name": supplier.supplier_name, "code": getattr(supplier, 'supplier_code', 'N/A'),
-                    "email": getattr(supplier, 'email', 'N/A'), "gstin": getattr(supplier, 'gstin', 'N/A')
+                    "id": supplier.id, 
+                    "name": supplier.supplier_name, 
+                    "code": getattr(supplier, 'supplier_code', 'N/A'),
+                    "email": getattr(supplier, 'email', 'N/A'), 
+                    "gstin": getattr(supplier, 'gstin', 'N/A'),
+                    "state": getattr(supplier, 'state', 'N/A'),
+                    "city": getattr(supplier, 'city', 'N/A'),
+                    "mobile": getattr(supplier, 'mobile', 'N/A')
                 },
                 "finish_stock": finish_total, "semi_finish_stock": semi_finish_total,
                 "items": items, "message": f"Details for {supplier.supplier_name}"
