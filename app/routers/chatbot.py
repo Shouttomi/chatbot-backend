@@ -67,9 +67,8 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
         stock_data = list(stock_map.values())
         
         if report_type == "low_stock":
-            # ✅ FIX: Ignore 0-stock items so the report shows actual active inventory running low
             active_stock = [x for x in stock_data if x["Stock"] > 0]
-            if not active_stock: # Safety net just in case everything is 0
+            if not active_stock: 
                 active_stock = stock_data
                 
             active_stock.sort(key=lambda x: x["Stock"])
@@ -93,8 +92,18 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
     suppliers_found = []
     clean_s = ""
 
-    supplier_keywords = ["supplier", "vendor", "party", "company", "email", "gstin", "sup-", "sup ", "suplier", "suppler", "supllier"]
-    is_supplier_intent = any(k in low_q for k in supplier_keywords) or intent in ["supplier_search", "supplier_list"]
+    # 🎯 FIX FOR ISSUE 2: Check for exact name match immediately (For when user clicks a supplier)
+    exact_supplier = db.execute(text("SELECT * FROM suppliers WHERE LOWER(supplier_name) = :q LIMIT 1"), {"q": low_q}).fetchall()
+
+    supplier_keywords = ["supplier", "vendor", "party", "company", "email", "gstin", "sup-", "sup ", "suplier", "suppler", "supllier", "active"]
+    
+    # Catch complex typos with Regex + Exact Match Check
+    is_supplier_intent = (
+        any(k in low_q for k in supplier_keywords) 
+        or re.search(r'\bsup\w*li\w*r\w*\b', low_q) # Catches "supplieeeer"
+        or intent in ["supplier_search", "supplier_list"]
+        or exact_supplier
+    )
 
     code_match = re.search(r'(sup[-\s]\d+)', low_q)
     if code_match:
@@ -104,12 +113,27 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
             num_part = re.sub(r'\D', '', clean_s)
             if num_part:
                  suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE id = :id LIMIT 1"), {"id": int(num_part)}).fetchall()
+                 
+    elif exact_supplier:
+        suppliers_found = exact_supplier # User clicked a valid supplier name
 
     elif is_supplier_intent:
-        noise = r'\b(bhai|kya|ki|status|hai|aaj|what|is|the|stock|for|who|email|gstin|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|supplier|suppliers|suplier|suppler|supllier)\b'
+        noise = r'\b(bhai|kya|ki|status|hai|aaj|what|is|the|stock|for|who|email|gstin|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|supplier|suppliers|suplier|suppler|supllier|active|list|all|kon|directory)\b'
         clean_s = re.sub(noise, '', low_q).strip()
+        
+        # 🎯 FIX FOR ISSUE 1: Erase crazy typos completely so they don't break the string
+        clean_s = re.sub(r'\bsup\w*li\w*r\w*\b', '', clean_s).strip()
         clean_s = re.sub(r'[^\w\s-]', '', clean_s).strip()
         clean_s = re.sub(r'\s+', ' ', clean_s)
+
+        # If nothing is left (e.g., "active supplier ki details"), RETURN DIRECTORY IMMEDIATELY!
+        if not clean_s or len(clean_s) < 2:
+            all_s = db.execute(text("SELECT id, supplier_name, supplier_code FROM suppliers ORDER BY supplier_name ASC")).fetchall()
+            return {"results": [{
+                "type": "supplier_list",
+                "message": "📋 Active Supplier Directory:",
+                "suppliers": [{"id": s.id, "name": f"{s.supplier_name} ({s.supplier_code or 'N/A'})"} for s in all_s]
+            }]}
 
         if clean_s:
             if clean_s.isdigit():
@@ -128,13 +152,16 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
                         best_match_id = s_names[matches[0]]
                         suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE id = :id LIMIT 1"), {"id": best_match_id}).fetchall()
 
+    # If we found Suppliers, Process them and STOP! (Do not proceed to Inventory Search)
     if suppliers_found:
         if len(suppliers_found) > 1:
             final_output.append({
                 "type": "supplier_list",
-                "message": f"I found multiple suppliers for '{clean_s}'. Please select one:",
+                "message": f"I found multiple suppliers. Please select one:",
                 "suppliers": [{"id": s.id, "name": f"{s.supplier_name} ({s.supplier_code or 'N/A'})"} for s in suppliers_found]
             })
+            return {"results": final_output} # 🛑 STOPS CODE HERE
+            
         elif len(suppliers_found) == 1:
             supplier = suppliers_found[0]
             inventories = db.execute(text("""
@@ -171,7 +198,9 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
                 "finish_stock": finish_total, "semi_finish_stock": semi_finish_total,
                 "items": items, "message": f"Details for {supplier.supplier_name}"
             })
-    
+            
+            return {"results": final_output} # 🛑 STOPS CODE HERE (Ensures items load properly)
+
     # 🚀 STEP 4: GENERAL INVENTORY SEARCH
     raw_targets = ai_data.get("specific_items", [])
     
@@ -181,13 +210,11 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
     inv_noise = r'\b(chahiye|kya|ki|status|hai|aaj|what|is|the|stock|for|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|item|supplier|suppliers|suplier|suppler|supllier|vendor|party|kon|list|all)\b'
     clean_q = re.sub(inv_noise, '', low_q).strip()
     
-    # ✅ FIX: Strip standalone quantities (like '50' or '10') so they don't break the string search
     clean_q = re.sub(r'\b\d+\b', '', clean_q)
     clean_q = re.sub(r'\s+', ' ', clean_q).strip()
     
     if not search_targets: 
         if clean_q: 
-            # ✅ FIX: Added 'aur' to the split logic
             if re.search(r'\b(and|or|aur)\b|,', clean_q):
                 search_targets = [x.strip() for x in re.split(r'\s+and\s+|\s+or\s+|\s+aur\s+|,', clean_q) if x.strip()]
             else:
@@ -260,7 +287,6 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
          }]}
 
     # 🆘 FALLBACK 2: TRUE RANDOM INVENTORY SUGGESTIONS
-    # ✅ FIX: Removed LIMIT 50 to pull from the entire catalog for genuine randomness
     all_suggestions = db.execute(text("SELECT id, name FROM inventories")).fetchall()
     
     if all_suggestions:
