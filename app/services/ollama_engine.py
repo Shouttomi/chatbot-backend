@@ -70,7 +70,7 @@ def ask_ollama(user_text: str, history: list = None):
 
     - 'chat' (Greetings or polite factory help)
       User: "namaste bhai"
-      Output: {"intent": "chat", "message": "नमस्ते! मैं Mewar ERP बॉट हूँ। आज मैं इन्वेंट्री और स्टॉक के साथ आपकी कैसे मदद कर सकता हूँ?"}
+      Output: {"intent": "chat", "message": "Hello! I am the Mewar ERP bot. How can I help you with inventory and stock today?""}
 
     - 'out_of_scope' (Math, general knowledge, or non-ERP chat)
       User: "what is 5+2?" or "tell me a joke"

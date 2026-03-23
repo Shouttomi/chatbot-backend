@@ -6,6 +6,7 @@ from app.schemas.chat import ChatRequest
 from app.dependencies import get_current_user
 import re
 import difflib
+import random # 🆕 ADDED: Needed for the random inventory fallback
 from app.services.ollama_engine import ask_ollama
 
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
@@ -86,7 +87,8 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
     suppliers_found = []
     clean_s = ""
 
-    supplier_keywords = ["supplier", "vendor", "party", "company", "email", "gstin", "sup-", "sup "]
+    # 🆕 FIXED: Added misspellings (suplier, suppler, supllier) to keywords
+    supplier_keywords = ["supplier", "vendor", "party", "company", "email", "gstin", "sup-", "sup ", "suplier", "suppler", "supllier"]
     is_supplier_intent = any(k in low_q for k in supplier_keywords) or intent in ["supplier_search", "supplier_list"]
 
     code_match = re.search(r'(sup[-\s]\d+)', low_q)
@@ -99,7 +101,8 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
                  suppliers_found = db.execute(text("SELECT * FROM suppliers WHERE id = :id LIMIT 1"), {"id": int(num_part)}).fetchall()
 
     elif is_supplier_intent:
-        noise = r'\b(bhai|kya|status|hai|aaj|what|is|the|stock|for|who|email|gstin|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|supplier|suppliers)\b'
+        # 🆕 FIXED: Added misspellings to the noise regex filter
+        noise = r'\b(bhai|kya|status|hai|aaj|what|is|the|stock|for|who|email|gstin|details|ka|ke|bata|batao|do|please|yaar|mujhe|of|show|me|our|supplier|suppliers|suplier|suppler|supllier)\b'
         clean_s = re.sub(noise, '', low_q).strip()
         clean_s = re.sub(r'[^\w\s-]', '', clean_s).strip()
         clean_s = re.sub(r'\s+', ' ', clean_s)
@@ -250,8 +253,12 @@ def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(ge
          }]}
 
     # 🆘 FALLBACK 2: INVENTORY SUGGESTIONS
-    suggestions = db.execute(text("SELECT id, name FROM inventories LIMIT 5")).fetchall()
-    if suggestions:
+    # 🆕 FIXED: Fetches a larger pool (50) and uses Python to pick 5 random items to ensure variety
+    raw_suggestions = db.execute(text("SELECT id, name FROM inventories LIMIT 50")).fetchall()
+    
+    if raw_suggestions:
+        # random.sample safely picks up to 5 unique items from the list
+        suggestions = random.sample(raw_suggestions, min(5, len(raw_suggestions)))
         return {"results": [{
             "type": "dropdown",
             "message": "I couldn't find exactly what you typed. Did you mean one of these?",
