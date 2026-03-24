@@ -7,12 +7,10 @@ import pandas as pd
 # ==========================================
 API_BASE = "https://mewar-erp.vercel.app"
 CHAT_URL = f"{API_BASE}/chatbot/"
-LOGIN_URL = f"{API_BASE}/auth/login"
 
 st.set_page_config(page_title="Mewar ERP AI", page_icon="🧠", layout="centered")
 
 # --- SESSION STATE INITIALIZATION ---
-if "token" not in st.session_state: st.session_state.token = None
 if "messages" not in st.session_state: st.session_state.messages = []
 if "next_query" not in st.session_state: st.session_state.next_query = None
 
@@ -48,12 +46,11 @@ def render_bot_response(data, msg_idx):
             
             st.caption(f"Item ID: #{inv['id']} | Category: {inv.get('classification', 'N/A')}")
         
-        # 🔵 CASE 2: SUPPLIER MATCH (✅ UPDATED LOGIC HERE)
+        # 🔵 CASE 2: SUPPLIER MATCH 
         elif res_type == "result" and "supplier" in res:
             sup = res["supplier"]
             st.info(f"🏭 **{sup['name']}**")
             
-            # Safely fetch all fields, default to 'N/A' if missing
             code = sup.get('code', 'N/A')
             email = sup.get('email', 'N/A')
             gstin = sup.get('gstin', 'N/A')
@@ -61,10 +58,8 @@ def render_bot_response(data, msg_idx):
             city = sup.get('city', 'N/A')
             state = sup.get('state', 'N/A')
             
-            # Display all details cleanly
             st.markdown(f"**Code:** {code}  \n**Mobile:** {mobile}  \n**Email:** {email}  \n**Location:** {city}, {state}  \n**GSTIN:** {gstin}")
             
-            # Handle the Inventory List Display
             if "items" in res:
                 st.write("---")
                 items = res.get("items", [])
@@ -73,7 +68,6 @@ def render_bot_response(data, msg_idx):
                     for item in items:
                         st.write(f"- {item.get('name')}: **{item.get('stock')}** in stock")
                 else:
-                    # ✅ FIX: Shows this message if the supplier has 0 items right now
                     st.info("📦 No active inventory currently in stock from this supplier.")
             
         # 🟡 CASE 3: DROPDOWN MENU
@@ -81,16 +75,11 @@ def render_bot_response(data, msg_idx):
             st.warning(res.get("message", "Select an item:"))
             cols = st.columns(2)
             for i, item in enumerate(res.get("items", [])):
-                
-                # ✅ FIX 1: Add the ID to the button label so you can tell them apart
                 button_label = f"🔎 {item['name']} (#{item['id']})"
-                
                 cols[i % 2].button(
                     button_label, 
                     key=f"btn_{item['id']}_{msg_idx}_{i}", 
                     on_click=set_next_query, 
-                    
-                    # ✅ FIX 2: Send the EXACT ID to the chat, not the name!
                     args=(str(item['id']),) 
                 )
                 
@@ -108,14 +97,9 @@ def render_bot_response(data, msg_idx):
         # 📊 CASE 5: MANAGER ANALYTICS CHARTS
         elif res_type == "analytics_chart":
             st.subheader(res.get("title", "📊 Analytics Report"))
-            
             df = pd.DataFrame(res.get("data", []))
-            
             if not df.empty:
-                # Show an interactive table
                 st.dataframe(df, use_container_width=True, hide_index=True)
-                
-                # Draw the Bar Chart
                 if res.get("chart_type") == "bar":
                     st.write("---")
                     st.bar_chart(df.set_index("Name")["Stock"])
@@ -129,49 +113,28 @@ def render_bot_response(data, msg_idx):
             st.write(res["message"])
 
 # ==========================================
-# PAGE 1: LOGIN SYSTEM
-# ==========================================
-if not st.session_state.token:
-    st.title("🔐 Mewar ERP Access")
-    
-    with st.form("auth_form"):
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        if st.form_submit_button("Authenticate"):
-            try:
-                res = requests.post(LOGIN_URL, data={"username": u, "password": p})
-                if res.status_code == 200:
-                    st.session_state.token = res.json().get("access_token")
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid Username or Password.")
-            except Exception as e:
-                st.error(f"📡 FastAPI Server is Offline. ({e})")
-    st.stop()
-
-# ==========================================
-# PAGE 2: CHATBOT INTERFACE
+# PAGE: CHATBOT INTERFACE
 # ==========================================
 with st.sidebar:
     st.header("Admin Panel")
-    st.write("Logged in as: **Admin**")
-    if st.button("🚪 Logout"):
-        st.session_state.token = None
+    st.write("Logged in as: **Local Dev**")
+    st.divider()
+    if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
         st.rerun()
-    st.divider()
-    st.caption("Mewar ERP AI - Enterprise Edition")
+    st.caption("Mewar ERP AI - Testing Mode")
 
 st.title("ERP Intelligence 🧠")
 
 def ask_erp(query):
-    headers = {"Authorization": f"Bearer {st.session_state.token}", "Content-Type": "application/json"}
+    # Removed the Authorization header entirely
+    headers = {"Content-Type": "application/json"}
     history = [{"role": m["role"], "content": m.get("raw_content", "")} for m in st.session_state.messages]
     try:
         r = requests.post(CHAT_URL, json={"query": query, "history": history}, headers=headers)
-        if r.status_code == 401: return {"detail": "Session Expired. Please Logout."}
         return r.json()
-    except: return {"error": "FastAPI Connection Failed."}
+    except Exception as e: 
+        return {"error": f"FastAPI Connection Failed. {str(e)}"}
 
 # Render Chat History
 for idx, msg in enumerate(st.session_state.messages):

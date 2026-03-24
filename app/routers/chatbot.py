@@ -3,7 +3,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.db.database import get_db
 from app.schemas.chat import ChatRequest
-from app.dependencies import get_current_user
 import re
 import difflib
 import random
@@ -12,7 +11,7 @@ from app.services.ollama_engine import ask_ollama
 router = APIRouter(prefix="/chatbot", tags=["Chatbot"])
 
 @router.post("/")
-def chatbot(request: ChatRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+def chatbot(request: ChatRequest, db: Session = Depends(get_db)):
     raw_q = request.query.strip()
     low_q = raw_q.lower()
     
