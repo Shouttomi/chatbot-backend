@@ -81,11 +81,17 @@ def render_bot_response(data, msg_idx):
             st.warning(res.get("message", "Select an item:"))
             cols = st.columns(2)
             for i, item in enumerate(res.get("items", [])):
+                
+                # ✅ FIX 1: Add the ID to the button label so you can tell them apart
+                button_label = f"🔎 {item['name']} (#{item['id']})"
+                
                 cols[i % 2].button(
-                    f"🔎 {item['name']}", 
+                    button_label, 
                     key=f"btn_{item['id']}_{msg_idx}_{i}", 
                     on_click=set_next_query, 
-                    args=(item['name'],)
+                    
+                    # ✅ FIX 2: Send the EXACT ID to the chat, not the name!
+                    args=(str(item['id']),) 
                 )
                 
         # 🟡 CASE 4: SUPPLIER LIST MENU
