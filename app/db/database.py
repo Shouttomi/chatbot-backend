@@ -297,26 +297,41 @@ def get_db():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LOCAL CHATBOT-OPS DB
+# CHATBOT-OPS DB (Aiven / remote MySQL)
 # Holds the three operational tables the chatbot writes to:
 #   entity_aliases, chatbot_feedback, alias_suggestions_skipped
-# Defaults to local MySQL so phpMyAdmin can edit them directly. Override via
-# LOCAL_DATABASE_URL env var when ready to move to prod.
+# Defaults to local MySQL for dev. Set LOCAL_DATABASE_URL env var for prod.
+# Aiven requires SSL — auto-detected by checking if host is not localhost.
 # ─────────────────────────────────────────────────────────────────────────────
 LOCAL_DATABASE_URL = os.getenv(
     "LOCAL_DATABASE_URL",
     "mysql+pymysql://root:@127.0.0.1:3306/chatbot",
 )
 
+# Build SQLAlchemy-compatible URL: replace mysql:// scheme with mysql+pymysql://
+_local_url = LOCAL_DATABASE_URL
+if _local_url.startswith("mysql://"):
+    _local_url = "mysql+pymysql://" + _local_url[len("mysql://"):]
+
+# Auto-enable SSL for any remote host (Aiven, PlanetScale, etc.)
+# Local dev (127.0.0.1 / localhost) skips SSL so no extra setup needed.
+_local_is_remote = not any(
+    h in _local_url for h in ["127.0.0.1", "localhost"]
+)
+_local_connect_args: dict = {"connect_timeout": 10}
+if _local_is_remote:
+    # PyMySQL SSL — disables hostname check so self-signed certs work too
+    _local_connect_args["ssl"] = {"check_hostname": False}
+
 local_engine = create_engine(
-    LOCAL_DATABASE_URL,
+    _local_url,
     echo=False,
     pool_pre_ping=True,
     pool_recycle=1800,
     pool_size=5,
     max_overflow=10,
-    pool_timeout=10,
-    connect_args={"connect_timeout": 5},
+    pool_timeout=15,
+    connect_args=_local_connect_args,
 )
 
 LocalSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=local_engine)
@@ -329,3 +344,4 @@ def get_local_db():
         yield db
     finally:
         db.close()
+
