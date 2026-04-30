@@ -613,9 +613,17 @@ def _v2_chatbot_impl(request: ChatRequest, db: Session):
     if _is_pure_special and len(raw_q) < 20 and not _is_confirm_token:
         return {"results": [{"type": "chat", "message": "Bhai, kuch samajh aane wala poochho. 😅"}]}
 
-    _sql_kw = ("select ", "insert ", "update ", "delete ", "drop ", "union ", "--", "/*", "';")
-    if any(raw_q.lower().startswith(kw) or f" {kw}" in raw_q.lower() for kw in _sql_kw):
+    # ── SQL injection guard ── catches SELECT/INSERT/UPDATE/DELETE/DROP/UNION etc.
+    # regardless of spacing, casing, comment padding, or semicolon chaining.
+    _SQL_INJECT_RE = re.compile(
+        r"\b(select|insert|update|delete|drop|truncate|alter|create|replace"
+        r"|exec|execute|grant|revoke|union|load_file|outfile|information_schema)\b"
+        r"|--|/\*|;\s*(drop|delete|insert|update|alter)",
+        re.I,
+    )
+    if _SQL_INJECT_RE.search(raw_q):
         return {"results": [{"type": "chat", "message": "Ye mujhse nahi hoga bhai. 😅 Koi ERP query poochho."}]}
+
 
     if raw_q.isdigit() and len(raw_q) >= 8:
         return {"results": [{"type": "chat", "message": "Koi item ID, supplier naam ya order number batao. 🙂"}]}
