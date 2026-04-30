@@ -271,17 +271,60 @@ if not DATABASE_URL:
 
 # 3. Create the engine with connection stability settings for remote hosts
 engine = create_engine(
-    DATABASE_URL, 
-    echo=True,
-    pool_pre_ping=True,  # Verifies connection is active before querying
-    pool_recycle=3600    # Reconnects every hour to prevent Hostinger timeouts
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,    # Verifies connection is active before querying
+    pool_recycle=1800,     # Recycle every 30m (Hostinger idle-kill is ~hourly)
+    pool_size=20,          # Steady concurrent connections
+    max_overflow=30,       # Burst capacity for traffic spikes (50 total)
+    pool_timeout=30,       # Wait up to 30s for a connection before erroring
+    connect_args={
+        "connect_timeout": 5,
+        "read_timeout": 15,
+        "write_timeout": 15,
+    },
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# 4. Dependency to get DB session
+# 4. Dependency to get DB session (PROD — Hostinger business data: suppliers, POs, etc.)
 def get_db():
     db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL CHATBOT-OPS DB
+# Holds the three operational tables the chatbot writes to:
+#   entity_aliases, chatbot_feedback, alias_suggestions_skipped
+# Defaults to local MySQL so phpMyAdmin can edit them directly. Override via
+# LOCAL_DATABASE_URL env var when ready to move to prod.
+# ─────────────────────────────────────────────────────────────────────────────
+LOCAL_DATABASE_URL = os.getenv(
+    "LOCAL_DATABASE_URL",
+    "mysql+pymysql://root:@127.0.0.1:3306/chatbot",
+)
+
+local_engine = create_engine(
+    LOCAL_DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=10,
+    connect_args={"connect_timeout": 5},
+)
+
+LocalSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=local_engine)
+
+
+def get_local_db():
+    """Dependency for endpoints that read/write chatbot operational tables only."""
+    db = LocalSessionLocal()
     try:
         yield db
     finally:

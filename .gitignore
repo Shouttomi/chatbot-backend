@@ -1,11 +1,44 @@
-# Ignore the virtual environment
+# ── Virtual environments ────────────────────────────────────────────
 env/
 venv/
+.venv/
+
+# ── Secrets ─────────────────────────────────────────────────────────
 .env
 
-# Ignore Python cache files
+# ── Python cache ─────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
 
-# Ignore IDE settings
+# ── IDE / OS ──────────────────────────────────────────────────────────
 .vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# ── Logs & runtime files ──────────────────────────────────────────────
+*.log
+logs.json
+chat_history.json
+chatbot_reqres.log
+
+# ── Test artifacts & reports ──────────────────────────────────────────
+chatbot_100_test_report.json
+chatbot_test_log.json
+chatbot_test_results.json
+debug_out.json
+final_regression.json
+final_test.json
+full_test_final.json
+test_results_raw.json
+db_check.json
+detail_check.json
+
+# ── SQL dumps ─────────────────────────────────────────────────────────
+*.sql
+
+# ── Misc generated ────────────────────────────────────────────────────
+tmp_magna.txt
